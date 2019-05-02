@@ -42,16 +42,17 @@
 		}
 	}
 
-	//okay, send back new price info
+	// Get discount price for valid levels.
 	$code_levels = array();
-
-	foreach($apply_discount_level_ids as $key => $level_id) {
+	foreach ( $apply_discount_level_ids as $key => $level_id ) {
+		
 		$sqlQuery = "SELECT l.id, cl.*, l.name, l.description, l.allow_signups FROM $wpdb->pmpro_discount_codes_levels cl LEFT JOIN $wpdb->pmpro_membership_levels l ON cl.level_id = l.id LEFT JOIN $wpdb->pmpro_discount_codes dc ON dc.id = cl.code_id WHERE dc.code = '" . $discount_code . "' AND cl.level_id = '" . $level_id . "' LIMIT 1";
 		$code_level = $wpdb->get_row($sqlQuery);
 
-		//if the discount code doesn't adjust the level, let's just get the straight level
-		if(empty($code_level))
+		//if the discount code doesn't adjust the level or the code is invalid, let's just get the straight level
+		if ( empty( $code_level ) || ! empty( $apply_discount_level_errors[$level_id] ) ) {
 			$code_level = $wpdb->get_row("SELECT * FROM $wpdb->pmpro_membership_levels WHERE id = '" . $level_id . "' LIMIT 1");
+		}
 
 		//filter adjustments to the level
 		$code_level = apply_filters("pmpro_discount_code_level", $code_level, $discount_code_id);
@@ -112,7 +113,7 @@
 			jQuery('#other_discount_code_p').hide();
 		});
 
-		<?php if ( empty( $apply_discount_level_errors ) ) : ?>
+		<?php if ( count( $apply_discount_level_ids ) > count( $apply_discount_level_errors ) ) : ?>
 		jQuery('#pmpro_level_cost').html('<p><?php printf(__('The <strong>%s</strong> code has been applied to your order.', 'paid-memberships-pro' ), $discount_code);?></p><p><?php echo pmpro_no_quotes(pmpro_getLevelsCost($code_levels), array('"', "'", "\n", "\r"))?><?php echo pmpro_no_quotes(pmpro_getLevelsExpiration($code_levels), array('"', "'", "\n", "\r"))?></p>');
 		<?php else : ?>
 		jQuery('#pmpro_level_cost').html('<p><?php echo pmpro_no_quotes(pmpro_getLevelsCost($code_levels), array('"', "'", "\n", "\r"))?><?php echo pmpro_no_quotes(pmpro_getLevelsExpiration($code_levels), array('"', "'", "\n", "\r"))?></p>');
@@ -170,10 +171,11 @@
 
 			foreach ( $code_levels as $code_level ) {
 				
-				if ( ! empty ( $apply_discount_level_errors[$code_level->id] ) ) {
+				if ( ! empty( $apply_discount_level_errors[$code_level->id] ) ) {
 					$code_level = false;
 				}
 				
+				//TODO Test filter
 				//filter to insert your own code
 				do_action('pmpro_applydiscountcode_return_js', $discount_code, $discount_code_id, $level_id, $code_level);
 			}
