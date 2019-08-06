@@ -1938,3 +1938,688 @@ class PMProGateway_stripe extends PMProGateway
 		}
 	}
 }
+
+
+	/**
+	 * Process order.
+	 *
+	 * @since 2.1.0
+	 */
+	function process2( &$order ) {
+		$this->set_payment_method( $order );
+		$this->set_customer( $order );
+		$this->attach_customer_to_payment_method( $order );
+		$this->process_charges( $order );
+		$this->process_subscriptions( $order );
+		
+		// TODO: Refactor and test error handling.
+		if ( ! empty( $order->error ) ) {
+			return false;
+		} else {
+			$order->status = 'success';
+			$order->saveOrder();
+			$this->clean_up();
+			return true;
+		}
+	}
+	
+	/**
+	 * Set the PaymentIntent and store in session.
+	 *
+	 * @since 2.1.0
+	 *
+	 * TODO: Update docblock.
+	 */
+	function set_payment_intent( &$order, $force = false ) {
+		
+		if ( ! empty( $this->payment_intent ) && ! $force ) {
+			return true;
+		}
+		
+		// TODO: Refactor
+		if ( ! empty( $order->error ) ) {
+			return false;
+		}
+		$payment_intent = $this->get_payment_intent( $order );
+		
+		if ( empty( $payment_intent ) ) {
+			return false;
+		}
+		
+		pmpro_set_session_var( 'pmpro_stripe_payment_intent', $payment_intent );
+		$this->payment_intent = $payment_intent;
+		
+		return true;
+	}
+	
+	/**
+	 * Retrieve the current PaymentIntent or create one if it doesn't exist.
+	 *
+	 * @return $payment_intent
+	 *
+	 * @since 2.1.0
+	 *
+	 * TODO Update docblock.
+	 */
+	function get_payment_intent( &$order ) {
+		
+		if ( ! empty( $order->error ) ) {
+			return false;
+		}
+		
+		$payment_intent = pmpro_get_session_var( 'pmpro_stripe_payment_intent' );
+		
+		if ( empty( $payment_intent ) ) {
+			$payment_intent = $this->create_payment_intent( $order );
+		}
+		
+		if ( empty( $payment_intent ) ) {
+			return false;
+		}
+		
+		// for testing with PHPUnit and stripe-mock
+		if ( defined( '__PHPUNIT_PHAR__' ) ) {
+			if ( 'pi_in_session' == $payment_intent->id ) {
+				$payment_intent->amount = 1000;
+			}
+		}
+		
+		return $payment_intent;
+	}
+	
+	/**
+	 * Set PaymentMethod.
+	 *
+	 * @since 2.1.0
+	 *
+	 * // TODO: update docblock
+	 */
+	function set_payment_method( &$order, $force = false ) {
+		
+		if ( ! empty( $this->payment_method ) && ! $force ) {
+			return true;
+		}
+		
+		// Try to get PaymentMethod ID from $_REQUEST.
+		if ( ! empty( $_REQUEST['payment_method_id'] ) ) {
+			 $payment_method_id = sanitize_text_field( $_REQUEST['payment_method_id'] );
+		}
+		
+		// Try to get PaymentMethod from ID.
+		if ( ! empty( $payment_method_id ) ) {
+			try {
+				$payment_method = Stripe_PaymentMethod::retrieve( $payment_method_id );
+			} catch ( \Exception $e ) {
+				$order->errorcode = true;
+				$order->error = $e->message;
+				$order->shorterror = $order->error;
+			}
+		}
+		
+		if ( empty( $payment_method ) ) {
+			if ( empty( $order->error ) ) {
+				$order->errorcode = true;
+				$order->error = __( 'Failed to set payment method. Unknown error. ', 'paid-memberships-pro' );
+				$order->shorterror = $order->error;
+			}
+			return false;
+		}
+		
+		// for testing with PHPUnit and stripe-mock
+		if ( defined( '__PHPUNIT_PHAR__' ) ) {
+			if ( 'cus_123' == $payment_method->id ) {
+				$order->errorcode = true;
+				$order->error = __( 'Failed to set payment method. Unknown error. ', 'paid-memberships-pro' );
+				$order->shorterror = $order->error;
+				return false;
+			}
+		}
+		
+		// Update the order with card information.
+		if ( ! empty( $payment_method->card ) ) {
+			$order->cardtype = $payment_method->card->brand;
+			$order->accountnumber = $payment_method->card->last4;
+			$order->expirationmonth = $payment_method->card->exp_month;
+			$order->expirationyear = $payment_method->card->exp_year;
+			// $order->CVV2 = $payment_method->card->cvc;
+		}
+		
+		$order->ExpirationDate        = $order->expirationmonth . $order->expirationyear;
+		$order->ExpirationDate_YdashM = $order->expirationyear . "-" . $order->expirationmonth;
+		
+		// Set the PaymentMethod.
+		$this->payment_method = $payment_method;
+		
+		// Set session var.
+		pmpro_set_session_var( 'pmpro_stripe_payment_method', $payment_method );
+		
+		return true;
+	 }
+	 
+	 /**
+	  * Set Customer.
+	  *
+	  * @since 2.1.0
+	  *
+	  * // TODO: update docblock
+	  */
+	 function set_customer( &$order ) {
+		 
+		 // TODO: Refactor
+		 if ( ! empty( $order->error ) ) {
+			 return false;
+		 }
+		 
+		 $this->getCustomer( $order );
+		 return true;
+	 }
+	 
+	 /**
+	  * Attach Customer to a Payment Method.
+	  *
+	  * @since 2.1.0
+	  *
+	  * // TODO: update docblock
+	  */
+	 function attach_customer_to_payment_method( &$order ) {
+		 
+		// TODO: Refactor
+		if ( ! empty( $order->error ) ) {
+			return false;
+		}
+		
+		$params = array(
+			'customer' => $this->customer->id,
+		);
+		try {
+			$this->payment_method->attach( $params );
+		} catch ( \Stripe\Error $e ) {
+			$order->error = $e->message;
+			return false;
+		}
+		
+		// for testing with PHPUnit and stripe-mock
+		if ( defined( '__PHPUNIT_PHAR__' ) ) {
+			if ( 'pm_attached' == $this->payment_method->id ) {
+				$order->error = 'testing';
+				return false;
+			} else if ( 'pm_unattached' == $this->payment_method->id ) {
+				$this->payment_method->customer = $this->customer->id;
+			}
+		}
+		
+		return true;
+	 }
+	 
+	 /**
+	  * Process one-time charges.
+	  *
+	  * @since 2.1.0
+	  *
+	  * // TODO: update docblock
+	  */
+	 function process_charges( &$order ) {
+		
+		if ( 0 === floatval( $order->InitialPayment ) ) {
+			return true;
+		}
+		
+		$this->set_payment_intent( $order );
+		$this->confirm_payment_intent3( $order );
+		
+		if ( ! empty( $order->error ) ) {
+			$order->error = __( "Initial payment failed: " . $order->error, 'paid-memberships-pro' );
+			return false;
+		}
+		
+		return true;
+	 }
+	 
+	 /**
+	  * Confirm PaymentIntent
+	  *
+	  * @since 2.1.0
+	  *
+	  * // TODO: update docblock
+	  */
+	 function confirm_payment_intent( &$order ) {
+		 
+		 if ( 'succeeded' === $this->payment_intent->status ) {
+			 return true;
+		 }
+		  
+		 $params = array(
+			'payment_method' => $this->payment_method 
+		 );
+		 
+		 try {
+			 $this->payment_intent->confirm( $params );
+		 } catch ( \Stripe\Error $e ) {
+			 $order->error = $e->message;
+			 return false;
+		 }
+		 
+		 if ( 'requires_action' == $this->payment_intent->status ) {
+			 $order->errorcode = true;
+			 // TODO: escape, change wording?
+			 $order->error = __( 'Customer authentication is required to finish setting up your subscription. Please complete the verification steps issued by your payment provider.', 'paid-memberships-pro' ); 
+			 return false;
+		 }
+		 
+		// for testing with PHPUnit and stripe-mock
+		if ( defined( '__PHPUNIT_PHAR__' ) ) {
+			switch ( $this->payment_intent->id ) {
+				case 'pi_succeeded':
+				 	$this->payment_intent->status = 'succeeded';
+					break;
+				case 'pi_requires_action':
+					$this->payment_intent->status = 'requires_action';
+					$order->errorcode = true;
+					// TODO: escape, change wording?
+					$order->error = __( 'Customer authentication is required to finish setting up your subscription. Please complete the verification steps issued by your payment provider.', 'paid-memberships-pro' ); 
+					return false;
+			}
+		}
+		
+		return true;
+	 }
+	 
+	 /**
+	  * Confirm SetupIntent
+	  *
+	  * @since 2.1.0
+	  *
+	  * // TODO: update docblock
+	  */
+	 function confirm_setup_intent( &$order ) {
+		 
+		 if ( 'succeeded' === $this->setup_intent->status ) {
+			 return true;
+		 }
+		  
+		 $params = array(
+			'payment_method' => $this->payment_method 
+		 );
+		 
+		 try {
+			 $this->setup_intent->confirm( $params );
+		 } catch ( \Stripe\Error $e ) {
+			 $order->error = $e->message;
+			 return false;
+		 }
+		 
+		 if ( 'requires_action' == $this->setup_intent->status ) {
+			 $order->errorcode = true;
+			 // TODO: escape, change wording?
+			 $order->error = __( 'Customer authentication is required to finish setting up your subscription. Please complete the verification steps issued by your payment provider.', 'paid-memberships-pro' ); 
+			 return false;
+		 }
+		 
+		// for testing with PHPUnit and stripe-mock
+		if ( defined( '__PHPUNIT_PHAR__' ) ) {
+			switch ( $this->setup_intent->id ) {
+				case 'seti_succeeded':
+				 	$this->setup_intent->status = 'succeeded';
+					break;
+				case 'seti_requires_action':
+					$this->setup_intent->status = 'requires_action';
+					$order->errorcode = true;
+					// TODO: escape, change wording?
+					$order->error = __( 'Customer authentication is required to finish setting up your subscription. Please complete the verification steps issued by your payment provider.', 'paid-memberships-pro' ); 
+					return false;
+			}
+		}
+		
+		return true;
+	 }
+	 
+	 /**
+	  * Process subscriptions.
+	  *
+	  * @since 2.1.0
+	  *
+	  * // TODO: update docblock
+	  */
+	 function process_subscriptions( &$order ) {
+		 
+		xdebug_break();
+		
+		if ( ! pmpro_isLevelRecurring( $order->membership_level ) ) {
+			return true;
+		}
+		
+		$this->set_setup_intent( $order );
+		$this->confirm_setup_intent( $order );
+		
+		if ( ! empty( $order->error ) ) {
+			$order->error = __( "Subscription failed: " . $order->error, 'paid-memberships-pro' );
+			return false;
+		}
+		
+		// TODO: Subscription updates?
+		
+		return true;
+	 }
+	 
+	 /**
+	  * Clean up PaymentIntent and SetupIntent if confirmed.
+	  *
+	  * @since 2.1.0
+	  *
+	  * // TODO: update docblock
+	  */
+	 function clean_up() {
+		 if ( ! empty( $this->payment_intent ) && 'succeeded' == $this->payment_intent->status ) {
+			 $this->unset_payment_intent();
+		 }		 
+	 }
+	 
+	 /**
+	  * Create a new PaymentIntent from an order.
+	   *
+	   * @since 2.1.0
+	   *
+	   * TODO: update docblock
+	   */
+	  function create_payment_intent( &$order ) {
+		  
+		  global $pmpro_currencies, $pmpro_currency;
+		  
+		  // TODO; Refactor: pmpro_get_currency_unit_multiplier()
+		  // Get currency mulitiplier.
+		  $currency_unit_multiplier = 100; //ie 100 cents per USD
+		  // Account for zero-decimal currencies like the Japanese Yen
+		  if(is_array($pmpro_currencies[$pmpro_currency]) && isset($pmpro_currencies[$pmpro_currency]['decimals']) && $pmpro_currencies[$pmpro_currency]['decimals'] == 0) {
+			  $currency_unit_multiplier = 1;
+		  }
+		  
+		  // TODO: Set order totals before processing order.
+		  $amount = $order->InitialPayment;
+		  $order->subtotal = $amount;
+		  $tax = $order->getTax(true);
+		  
+		  $amount = pmpro_round_price((float)$order->subtotal + (float)$tax);
+		  
+		  $params = array(
+			  'customer' => $this->customer->id,
+			  'payment_method' => $this->payment_method->id,
+			  'amount' => $amount,
+			  'currency' => $pmpro_currency,
+			  'confirmation_method' => 'manual',
+		  );
+		  
+		  try {
+			  $payment_intent = Stripe_PaymentIntent::create( $params );		
+		  } catch ( \Stripe\Error $e ) {
+			  $order->error = $e->message;
+			  return false;
+		  }
+		  
+		  // for testing with PHPUnit and stripe-mock
+		  if ( defined( '__PHPUNIT_PHAR__' ) ) {
+			  if ( ! empty( $payment_intent ) && 1234567890 == $payment_intent->created ) {
+				  $payment_intent->amount = 1000;
+			  }
+		  }
+		  
+		  return $payment_intent;
+	  }
+	  
+	  /**
+	   * Create a new Plan from an order.
+		*
+		* @since 2.1.0
+		*
+		* TODO: update docblock
+		*/
+	   function create_plan( &$order ) {
+		   
+		   global $pmpro_currencies, $pmpro_currency;
+		   
+		   // TODO: Refactor and set all of this before processing the order.
+		   //figure out the amounts
+		   $amount = $order->PaymentAmount;
+		   $amount_tax = $order->getTaxForPrice($amount);
+		   $amount = pmpro_round_price((float)$amount + (float)$amount_tax);
+		   
+		   // TODO; Refactor: pmpro_get_currency_unit_multiplier()
+		   // Get currency mulitiplier.
+		   $currency_unit_multiplier = 100; //ie 100 cents per USD
+		   // Account for zero-decimal currencies like the Japanese Yen
+		   if(is_array($pmpro_currencies[$pmpro_currency]) && isset($pmpro_currencies[$pmpro_currency]['decimals']) && $pmpro_currencies[$pmpro_currency]['decimals'] == 0) {
+			   $currency_unit_multiplier = 1;
+		   }
+
+		   /*
+			   There are two parts to the trial. Part 1 is simply the delay until the first payment
+			   since we are doing the first payment as a separate transaction.
+			   The second part is the actual "trial" set by the admin.
+
+			   Stripe only supports Year or Month for billing periods, but we account for Days and Weeks just in case.
+		   */
+		   //figure out the trial length (first payment handled by initial charge)
+		   if($order->BillingPeriod == "Year") {
+			   $trial_period_days = $order->BillingFrequency * 365;	//annual
+		   } elseif($order->BillingPeriod == "Day") {
+			   $trial_period_days = $order->BillingFrequency * 1;		//daily
+		   } elseif($order->BillingPeriod == "Week") {
+			   $trial_period_days = $order->BillingFrequency * 7;		//weekly
+		   } else {
+			   $trial_period_days = $order->BillingFrequency * 30;	//assume monthly
+		   }			
+
+		   //convert to a profile start date
+		   $order->ProfileStartDate = date_i18n("Y-m-d", strtotime("+ " . $trial_period_days . " Day", current_time("timestamp"))) . "T0:0:0";
+
+		   //filter the start date
+		   $order->ProfileStartDate = apply_filters("pmpro_profile_start_date", $order->ProfileStartDate, $order);
+
+		   //convert back to days
+		   $trial_period_days = ceil(abs(strtotime(date_i18n("Y-m-d"), current_time("timestamp")) - strtotime($order->ProfileStartDate, current_time("timestamp"))) / 86400);
+
+		   //for free trials, just push the start date of the subscription back
+		   if(!empty($order->TrialBillingCycles) && $order->TrialAmount == 0) {
+			   $trialOccurrences = (int)$order->TrialBillingCycles;
+			   if($order->BillingPeriod == "Year") {
+				   $trial_period_days = $trial_period_days + (365 * $order->BillingFrequency * $trialOccurrences);	//annual
+			   } elseif($order->BillingPeriod == "Day") {
+				   $trial_period_days = $trial_period_days + (1 * $order->BillingFrequency * $trialOccurrences);		//daily
+			   } elseif($order->BillingPeriod == "Week") {
+				   $trial_period_days = $trial_period_days + (7 * $order->BillingFrequency * $trialOccurrences);	//weekly
+			   } else {
+				   $trial_period_days = $trial_period_days + (30 * $order->BillingFrequency * $trialOccurrences);	//assume monthly
+			   }
+		   } elseif(!empty($order->TrialBillingCycles)) {
+			   
+			   // TODO: Test this.
+		   }
+		   
+		   // Save $trial_period_days to order for now too.
+		   $order->TrialPeriodDays = $trial_period_days;
+		   
+		   //create a plan
+		   try {
+			   $plan = array(
+				   "amount" => $amount * $currency_unit_multiplier,
+				   "interval_count" => $order->BillingFrequency,
+				   "interval" => strtolower($order->BillingPeriod),
+				   "trial_period_days" => $trial_period_days,
+				   'product' => array( 'name' => $order->membership_name . " for order " . $order->code),
+				   "currency" => strtolower($pmpro_currency),
+				   "id" => $order->code
+			   );
+			   $order->plan = Stripe_Plan::create(apply_filters('pmpro_stripe_create_plan_array', $plan));
+		   } catch ( \Stripe\Error $e) {
+			   $order->error = __("Error creating plan with Stripe:", 'paid-memberships-pro' ) . $e->getMessage();
+			   $order->shorterror = $order->error;
+			   return false;
+		   }
+		   
+		   return $order->plan;
+	   }
+	   
+	   /**
+		* Create a new Subscription from an order.
+		 *
+		 * @since 2.1.0
+		 *
+		 * TODO: update docblock
+		 */
+		function create_subscription( &$order ) {
+			
+			//subscribe to the plan
+			try {
+				$params = array(
+					'customer' => $this->customer->id,
+					'default_payment_method' => $this->payment_method->id,
+					'items' => array(
+						array( 'plan' => $order->code ),
+					),
+					'trial_period_days' => $order->TrialPeriodDays,
+					'expand' => array(
+						'latest_invoice.payment_intent',
+						'pending_setup_intent',
+					),
+					'payment_behavior' => 'allow_incomplete',
+				);
+				$order->subscription = Stripe_Subscription::create( $params );
+			} catch ( \Stripe\Error $e) {
+				//return error
+				$order->error = __("Error subscribing customer to plan with Stripe:", 'paid-memberships-pro' ) . $e->getMessage();
+				$order->shorterror = $order->error;
+				return false;
+			}
+			
+			// for testing with PHPUnit and stripe-mock
+			if ( defined( '__PHPUNIT_PHAR__' ) ) {
+				if ( ! empty( $order->subscription ) ) {
+					switch( $order->subscription->customer ) {
+						case 'cus_trialing':
+						case 'cus_requires_action':
+						case 'cus_no_setup_intent':
+						$order->subscription->status = 'trialing';
+						$order->subscription->pending_setup_intent->status = 'requires_action';
+							break;
+					}
+				}
+			}
+			
+			return $order->subscription;
+			
+		}
+		
+		/**
+		 * Delete a Plan created from an order.
+		  *
+		  * @since 2.1.0
+		  *
+		  * TODO: update docblock
+		  */
+		 function delete_plan( &$order ) {
+			 try {
+			 	 $order->plan->delete();
+			 } catch ( \Stripe\Error $e) {
+				 //return error
+				 $order->error = $e->message;
+				 $order->shorterror = $order->error;
+				 return false;
+			 }
+			 return true;
+		 }
+	  
+	  /**
+	   * Create a new SetupIntent from an order.
+		*
+		* @since 2.1.0
+		*
+		* TODO: update docblock
+		*/
+	   function create_setup_intent( &$order ) {
+		   
+			$this->create_plan( $order );
+			$subscription = $this->create_subscription( $order );
+			$this->delete_plan( $order );
+			 
+			if ( ! empty( $order->error ) || empty( $subscription->pending_setup_intent ) ) {
+			  	return false;
+			}
+			
+			if ( ! empty( $subscription->pending_setup_intent ) ) {
+				return $subscription->pending_setup_intent;
+			}
+			  
+			// // for testing with PHPUnit and stripe-mock
+			// if ( defined( '__PHPUNIT_PHAR__' ) ) {
+			//    if ( ! empty( $payment_intent ) && 1234567890 == $payment_intent->created ) {
+			// 		   $payment_intent->amount = 1000;
+			//    }
+			// }
+			   
+	   }
+	   
+	   /**
+		* Set the SetupIntent and store in session.
+		*
+		* @since 2.1.0
+		*
+		* TODO: Update docblock.
+		*/
+	   function set_setup_intent( &$order, $force = false ) {
+		   
+		   // TODO: Refactor
+		   if ( ! empty( $order->error ) ) {
+			   return false;
+		   }
+		   
+		   if ( ! empty( $this->setup_intent ) && ! $force ) {
+			   return true;
+		   }
+		   
+		   $setup_intent = $this->get_setup_intent( $order );
+		   
+		   if ( empty( $setup_intent ) ) {
+			   return false;
+		   }
+		   
+		   pmpro_set_session_var( 'pmpro_stripe_payment_intent', $setup_intent );
+		   $this->setup_intent = $setup_intent;
+		   
+		   return true;
+	   }
+	   
+	   /**
+		* Retrieve the current SetupIntent or create one if it doesn't exist.
+		*
+		* @return $payment_intent
+		*
+		* @since 2.1.0
+		*
+		* TODO Update docblock.
+		*/
+	   function get_setup_intent( &$order ) {
+		   
+		   // TODO: Refactor
+		   if ( ! empty( $order->error ) ) {
+			   return false;
+		   }
+		   
+		   $setup_intent = pmpro_get_session_var( 'pmpro_stripe_setup_intent' );
+		   
+		   if ( empty( $setup_intent ) ) {
+			   $setup_intent = $this->create_setup_intent( $order );
+		   }
+		   
+		   if ( empty( $setup_intent ) ) {
+			   return false;
+		   }
+		   
+		   // for testing with PHPUnit and stripe-mock
+		   if ( defined( '__PHPUNIT_PHAR__' ) ) {
+			   if ( 'seti_123456789' == $setup_intent->id ) {
+				   $setup_intent->amount = 1000;
+			   }
+		   }
+		   
+		   return $setup_intent;
+	   }
+}
