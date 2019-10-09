@@ -1,5 +1,5 @@
 <?php
-	global $gateway, $pmpro_review, $skip_account_fields, $pmpro_paypal_token, $wpdb, $current_user, $pmpro_msg, $pmpro_msgt, $pmpro_requirebilling, $pmpro_level, $pmpro_levels, $tospage, $pmpro_show_discount_code, $pmpro_error_fields;
+	global $gateway, $pmpro_review, $skip_account_fields, $pmpro_paypal_token, $wpdb, $current_user, $pmpro_msg, $pmpro_msgt, $pmpro_requirebilling, $pmpro_level, $pmpro_levels, $tospage, $pmpro_show_discount_code, $pmpro_error_fields, $pmpro_checkout_levels;
 	global $discount_code, $username, $password, $password2, $bfirstname, $blastname, $baddress1, $baddress2, $bcity, $bstate, $bzipcode, $bcountry, $bphone, $bemail, $bconfirmemail, $CardType, $AccountNumber, $ExpirationMonth,$ExpirationYear;
 
 	/**
@@ -57,11 +57,48 @@
 				?>
 
 				<div id="pmpro_level_cost">
+					<?php if ( ! empty( $pmpro_checkout_levels ) ) {
+						
+						// Check each code and save errors in array.
+						$apply_discount_level_errors = array();
+						foreach ( $pmpro_checkout_levels as $key => $level_id ) {
+							$check = pmpro_checkDiscountCode($discount_code, $level_id, true);
+							if ( false == $check[0] ) {
+								$apply_discount_level_errors[$level_id] = $check[1];
+							}
+						}
+						
+						// Get discount price for valid levels.
+						$code_levels = array();
+						foreach ( $pmpro_checkout_levels as $key => $level_id ) {
+							
+							$sqlQuery = "SELECT l.id, cl.*, l.name, l.description, l.allow_signups FROM $wpdb->pmpro_discount_codes_levels cl LEFT JOIN $wpdb->pmpro_membership_levels l ON cl.level_id = l.id LEFT JOIN $wpdb->pmpro_discount_codes dc ON dc.id = cl.code_id WHERE dc.code = '" . $discount_code . "' AND cl.level_id = '" . $level_id . "' LIMIT 1";
+							$code_level = $wpdb->get_row($sqlQuery);
+
+							//if the discount code doesn't adjust the level or the code is invalid, let's just get the straight level
+							if ( empty( $code_level ) || ! empty( $apply_discount_level_errors[$level_id] ) ) {
+								$code_level = $wpdb->get_row("SELECT * FROM $wpdb->pmpro_membership_levels WHERE id = '" . $level_id . "' LIMIT 1");
+							}
+
+							//filter adjustments to the level
+							$code_level = apply_filters("pmpro_discount_code_level", $code_level, $discount_code_id);
+
+							$code_levels[$level_id] = $code_level;
+						}
+						
+						if ( count( $pmpro_checkout_levels ) > count( $apply_discount_level_errors ) ) {
+							printf(__('<p class="pmpro_level_discount_applied">The <strong>%s</strong> code has been applied to your order.</p>', 'paid-memberships-pro' ), $discount_code);
+						}
+						echo wpautop(pmpro_getLevelsCost($code_levels));
+						echo wpautop(pmpro_getLevelsExpiration($code_levels));
+						
+					} else { ?>
 					<?php if($discount_code && pmpro_checkDiscountCode($discount_code)) { ?>
 						<?php printf(__('<p class="pmpro_level_discount_applied">The <strong>%s</strong> code has been applied to your order.</p>', 'paid-memberships-pro' ), $discount_code);?>
 					<?php } ?>
 					<?php echo wpautop(pmpro_getLevelCost($pmpro_level)); ?>
 					<?php echo wpautop(pmpro_getLevelExpiration($pmpro_level)); ?>
+				<?php } ?>
 				</div>
 
 				<?php do_action("pmpro_checkout_after_level_cost"); ?>
