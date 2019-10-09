@@ -361,7 +361,7 @@ use Braintree\WebhookNotification as Braintree_WebhookNotification;
 		 *
 		 * @since 2.1
 		 */
-		static function pmpro_checkout_after_preheader() {
+		static function pmpro_checkout_after_preheader( $order ) {
 			global $gateway, $pmpro_level;
 
 			$default_gateway = pmpro_getOption("gateway");
@@ -406,17 +406,23 @@ use Braintree\WebhookNotification as Braintree_WebhookNotification;
 
 			    $client_token = \Braintree\ClientToken::generate();
 
+				$localize_vars = array(
+					'encryptionKey' => pmpro_getOption( 'braintree_encryptionkey' ),
+					'clientToken' => $client_token,
+				);
+
+				if ( ! empty( $order ) ) {
+				    $localize_vars[ $order ] = $order;
+				}
+
 				wp_enqueue_script("braintree", "https://js.braintreegateway.com/web/3.50.1/js/client.min.js", array(), NULL);
                 wp_enqueue_script("braintree_3ds", "https://js.braintreegateway.com/web/3.50.1/js/three-d-secure.min.js", array(), NULL);
                 wp_enqueue_script("braintree_hosted_fields", "https://js.braintreegateway.com/web/3.50.1/js/hosted-fields.js", array(), NULL);
 				wp_register_script( 'pmpro_braintree',
                         plugins_url( 'js/pmpro-braintree.js', PMPRO_BASE_FILE ),
-                        array( 'jquery' ),
+                        array( 'jquery', 'pmpro_checkout' ),
                         PMPRO_VERSION );
-				wp_localize_script( 'pmpro_braintree', 'pmproBraintree', array(
-					'encryptionKey' => pmpro_getOption( 'braintree_encryptionkey' ),
-                    'clientToken' => $client_token,
-				));
+				wp_localize_script( 'pmpro_braintree', 'pmproBraintree', $localize_vars );
 				wp_enqueue_script( 'pmpro_braintree' );
 			}
 		}
@@ -1143,9 +1149,8 @@ use Braintree\WebhookNotification as Braintree_WebhookNotification;
         $steps = array(
             'set_customer',
             'set_payment_method',
-//            'attach_source_to_customer',
             'process_charges',
-//            'process_subscriptions',
+	        'process_subscriptions',
         );
 
         foreach( $steps as $key => $step ) {
@@ -1182,11 +1187,39 @@ use Braintree\WebhookNotification as Braintree_WebhookNotification;
 
     function get_payment_method( &$order ) {
 
-	    return $order->braintree->payment_method_nonce;
+	    // If we already have a 3DS enriched nonce, just use that.
+	    if ( ! empty( $order->braintree->threeDS_nonce ) ) {
+	        return $order->braintree->threeDS_nonce;
+        }
 
+	    try
+	    {
+		    $response = Braintree_PaymentMethod::create( array(
+                'customerId' => $this->customer->id,
+                'paymentMethodNonce' => $order->braintree->payment_method_nonce,
+            ));
+	    }
+        // TODO Better error handling.
+	    catch (Exception $e)
+	    {
+		    $order->status = "error";
+		    $order->errorcode = true;
+		    $order->error = "Error: " . $e->getMessage() . " (" . get_class($e) . ")";
+		    $order->shorterror = $order->error;
+		    return false;
+	    }
+	    if ( ! $response->success ) {
+		    $order->status = "error";
+		    $order->errorcode = true;
+		    $order->error = "Error: " . $response->message;
+		    $order->shorterror = $order->error;
+		    return false;
+	    }
+
+	    return $response->paymentMethod;
     }
 
-    function set_customer( &$order, $force = false  ) {
+		function set_customer( &$order, $force = false  ) {
         if ( ! empty( $this->customer ) && ! $force ) {
             return true;
         }
@@ -1217,7 +1250,16 @@ use Braintree\WebhookNotification as Braintree_WebhookNotification;
             return true;
         }
 
-        if ( ! self::$is_loaded ) {
+	    // TODO Get values from settings.
+	    $initial_amount_verified = false;
+	    $threeDS_required = true;
+	    if ( $threeDS_required && ! $initial_amount_verified ) {
+		    $order->errorcode = 'verification_required';
+		    $order->error = 'Verification is required to complete the payment. Processing...';
+		    return false;
+	    }
+
+	    if ( ! self::$is_loaded ) {
 
             $order->error = __("Payment error: Please contact the webmaster (braintree-load-error)", "paid-memberships-pro");
             return false;
@@ -1235,20 +1277,30 @@ use Braintree\WebhookNotification as Braintree_WebhookNotification;
         $tax = $order->getTax(true);
         $amount = pmpro_round_price((float)$order->subtotal + (float)$tax);
 
+        if ( is_string( $this->payment_method ) ) {
+            $payment_method_nonce = $this->payment_method;
+        } else {
+            $payment_method_nonce = $this->payment_method->nonce;
+        }
         //charge
-        try
-        {
-            $response = Braintree_Transaction::sale(array(
+        try {
+
+            // TODO Get setting.
+            $threeDSecure = true;
+
+            $params = array(
 	            'amount' => $amount,
-                'customerId' => $this->customer->id,
-                'paymentMethodNonce' => $this->payment_method,
-                'options' => array(
-                    'submitForSettlement' => true,
-                    'threeDSecure' => array(
-                        'required' => true,
-                    )
-                )
-            ));
+	            'customerId' => $this->customer->id,
+	            'paymentMethodNonce' => $payment_method_nonce,
+	            'options' => array(
+		            'submitForSettlement' => true,
+		            'threeDSecure' => array(
+			            'required' => $threeDSecure,
+		            )
+	            )
+            );
+
+	        $response = Braintree_Transaction::sale( $params );
         }
         // TODO Better error handling.
         catch (Exception $e)
@@ -1355,47 +1407,106 @@ use Braintree\WebhookNotification as Braintree_WebhookNotification;
             return true;
         }
 
-        //before subscribing, let's clear out the updates so we don't trigger any during sub
-        if(!empty($user_id)) {
-            $old_user_updates = get_user_meta($user_id, "pmpro_stripe_updates", true);
-            update_user_meta($user_id, "pmpro_stripe_updates", array());
-        }
-
-        $this->set_setup_intent( $order );
-        $this->confirm_setup_intent( $order );
-
-        if ( ! empty( $order->error ) ) {
-            $order->error = __( "Subscription failed: " . $order->error, 'paid-memberships-pro' );
-
-            //give the user any old updates back
-            if(!empty($user_id)) {
-                update_user_meta($user_id, "pmpro_stripe_updates", $old_user_updates);
-            }
-
+        // TODO Get values from settings.
+        $recurring_amount_verified = false;
+        $threeDS_required = true;
+        if ( $threeDS_required && ! $recurring_amount_verified ) {
+            $order->errorcode = 'threeDS_required_for_subscription';
+            $order->error = 'Verification is required to set up the subscription. Processing...';
             return false;
         }
 
-        //save new updates if this is at checkout
-        //empty out updates unless set above
-        if(empty($new_user_updates)) {
-            $new_user_updates = array();
-        }
+	    //figure out the amounts
+	    $amount = $order->PaymentAmount;
+	    $amount_tax = $order->getTaxForPrice($amount);
+	    $amount = pmpro_round_price((float)$amount + (float)$amount_tax);
 
-        //update user meta
-        if(!empty($user_id)) {
-            update_user_meta($user_id, "pmpro_stripe_updates", $new_user_updates);
-        } else {
-            //need to remember the user updates to save later
-            global $pmpro_stripe_updates;
-            $pmpro_stripe_updates = $new_user_updates;
-            function pmpro_user_register_stripe_updates($user_id) {
-                global $pmpro_stripe_updates;
-                update_user_meta($user_id, "pmpro_stripe_updates", $pmpro_stripe_updates);
-            }
-            add_action("user_register", "pmpro_user_register_stripe_updates");
-        }
+	    /*
+			There are two parts to the trial. Part 1 is simply the delay until the first payment
+			since we are doing the first payment as a separate transaction.
+			The second part is the actual "trial" set by the admin.
 
-        return true;
+			Braintree only supports Year or Month for billing periods, but we account for Days and Weeks just in case.
+		*/
+	    //figure out the trial length (first payment handled by initial charge)
+	    if($order->BillingPeriod == "Year")
+		    $trial_period_days = $order->BillingFrequency * 365;	//annual
+        elseif($order->BillingPeriod == "Day")
+		    $trial_period_days = $order->BillingFrequency * 1;		//daily
+        elseif($order->BillingPeriod == "Week")
+		    $trial_period_days = $order->BillingFrequency * 7;		//weekly
+	    else
+		    $trial_period_days = $order->BillingFrequency * 30;	//assume monthly
+
+	    //convert to a profile start date
+	    $order->ProfileStartDate = date_i18n("Y-m-d", strtotime("+ " . $trial_period_days . " Day", current_time("timestamp"))) . "T0:0:0";
+
+	    //filter the start date
+	    $order->ProfileStartDate = apply_filters("pmpro_profile_start_date", $order->ProfileStartDate, $order);
+
+	    $start_ts  = strtotime($order->ProfileStartDate, current_time("timestamp") );
+	    $now =  strtotime( date('Y-m-d\T00:00:00', current_time('timestamp' ) ), current_time('timestamp' ) );
+
+	    //convert back to days
+	    $trial_period_days = ceil(abs( $now - $start_ts ) / 86400);
+
+	    //now add the actual trial set by the site
+	    if(!empty($order->TrialBillingCycles))
+	    {
+		    $trialOccurrences = (int)$order->TrialBillingCycles;
+		    if($order->BillingPeriod == "Year")
+			    $trial_period_days = $trial_period_days + (365 * $order->BillingFrequency * $trialOccurrences);	//annual
+            elseif($order->BillingPeriod == "Day")
+			    $trial_period_days = $trial_period_days + (1 * $order->BillingFrequency * $trialOccurrences);		//daily
+            elseif($order->BillingPeriod == "Week")
+			    $trial_period_days = $trial_period_days + (7 * $order->BillingFrequency * $trialOccurrences);	//weekly
+		    else
+			    $trial_period_days = $trial_period_days + (30 * $order->BillingFrequency * $trialOccurrences);	//assume monthly
+	    }
+
+	    //subscribe to the plan
+	    try
+	    {
+		    $details = array(
+			    'paymentMethodNonce' => $this->payment_method->nonce,
+			    'planId' => $this->get_plan_id( $order->membership_id ),
+			    'price' => $amount
+		    );
+
+		    if(!empty($trial_period_days))
+		    {
+			    $details['trialPeriod'] = true;
+			    $details['trialDuration'] = $trial_period_days;
+			    $details['trialDurationUnit'] = "day";
+		    }
+
+		    if(!empty($order->TotalBillingCycles))
+			    $details['numberOfBillingCycles'] = $order->TotalBillingCycles;
+
+		    $result = Braintree_Subscription::create($details);
+	    }
+	    catch (Exception $e)
+	    {
+		    $order->error = sprint( __("Error subscribing customer to plan with Braintree: %s (%s)", 'paid-memberships-pro' ), $e->getMessage(), get_class($e) );
+		    //return error
+		    $order->shorterror = $order->error;
+		    return false;
+	    }
+
+	    if($result->success)
+	    {
+		    //if we got this far, we're all good
+		    $order->status = "success";
+		    $order->subscription_transaction_id = $result->subscription->id;
+		    return true;
+	    }
+	    else
+	    {
+		    $order->error = sprintf( __("Failed to subscribe with Braintree: %s", 'paid-memberships-pro' ),  $result->message );
+		    $order->shorterror = $result->message;
+		    return false;
+	    }
+
     }
 
     function create_plan( &$order ) {

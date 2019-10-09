@@ -1,4 +1,5 @@
 jQuery(document).ready(function( $ ){
+
     // Discount code JS if we are showing discount codes.
     if ( pmpro.show_discount_code ) {
         //update discount code link to show field at top of form
@@ -130,6 +131,7 @@ jQuery(document).ready(function( $ ){
 	// Find ALL <form> tags on your page
 	jQuery('form').submit(function(){
 
+		form = $(this);
 		event.preventDefault();
 
 		// On submit disable its submit button
@@ -137,19 +139,36 @@ jQuery(document).ready(function( $ ){
 		jQuery('input[type=image]', this).attr('disabled', 'disabled');
 		jQuery('#pmpro_processing_message').css('visibility', 'visible');
 
+		form.trigger( 'processing' );
+
 		// Get order object for client-side actions (such as 3DS verification).
-		// TODO Test security.
-		data = {
-			action: 'pmpro_get_checkout_order',
+		if ( ! pmpro.order ) {
+			// TODO Test security.
+			data = {
+				action: 'pmpro_get_checkout_order',
+			}
+			// TODO Test all input types.
+			$(':input', this).each(function() {
+				data[this.name] = this.value;
+			});
+			$.post( pmpro.ajaxurl, data, function( response ) {
+				// TODO Handle errors.
+				pmpro.order = JSON.parse(response);
+				console.log( 'Got order' );
+			}).then( function() {
+				form.trigger( 'submitOrderReady' );
+			});
 		}
-		// TODO Test all input types.
-		$(':input', this).each(function() {
-			data[this.name] = this.value;
-		});
-		$.post( pmpro.ajaxurl, data, function( response ) {
-			// TODO Handle errors.
-		    pmpro.order = JSON.parse(response);
-		});
+
+		// TODO Use custom Event and error handling?
+		// $(this).trigger( 'pmproSubmit' );
+		// if ( ! pmpro.error ) {
+		// 	// this.submit();
+		// } else {
+		// 	// TODO Show error
+		// 	alert( pmpro.error );
+		// }
+
 	});
 
 	//iOS Safari fix (see: http://stackoverflow.com/questions/20210093/stop-safari-on-ios7-prompting-to-save-card-data)

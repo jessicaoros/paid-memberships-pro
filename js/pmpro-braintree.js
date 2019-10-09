@@ -1,5 +1,7 @@
 jQuery(document).ready(function ($) {
 
+    pmpro.order = pmproBraintree.order;
+
     var hostedFields, threeDSecure;
 
     braintree.client.create({
@@ -17,48 +19,59 @@ jQuery(document).ready(function ($) {
         console.log(e);
     });
 
-    $('.pmpro_form').submit(function (event) {
+    // Handle authentication if required.
+    pmpro.order.error = true;
+    pmpro.order.errortype = 'verification_required';
+    if ( pmpro.order.error && 'verification_required' === pmpro.order.errortype ) {
+        // On submit disable its submit button
+        $('input[type=submit]', this).attr('disabled', 'disabled');
+        $('input[type=image]', this).attr('disabled', 'disabled');
+        $('#pmpro_processing_message').css('visibility', 'visible');
+
+        if ( 'verified' !== pmproBraintree.initialAmount ) {
+            amount = pmproBraintree.initialAmount;
+        } else {
+            amount = pmproBraintree.recurringAmount;
+        }
+
+        threeDSecure.verifyCard({
+            onLookupComplete: function (data, next) {
+                next();
+            },
+            amount: amount,
+            nonce: pmproBraintree.paymentMethod.nonce,
+            bin: response.details.bin,
+            // billingAddress: billingAddress,
+        }).then(braintreeResponseHandler);
+    }
+
+    $('.pmpro_form').on( 'submitOrderReady', function (event) {
+
+        console.log( 'Doing Braintree stuff.' );
 
         var billingAddress;
 
-        // Prevent the form from submitting with the default action.
-        event.preventDefault();
-
         // TODO Double check in case a discount code made the level free.
         if ( pmpro_require_billing ) {
-
             hostedFields.tokenize()
                 .then(braintreeResponseHandler)
                 .catch( function (e) {
-                    console.log( e );
+                    // TODO Handle errors.
+                    // pmpro.error = e.message;
+                    console.log(e);
                 });
-                // }).then(function (response) {
-                //     if( 'authenticate_successful' === response.threeDSecureInfo.status ) {
-                //         $('.pmpro_form').append( '<input type="hidden" name="braintree_3ds_nonce" value="' + response.nonce + '"/>' );
-                //         $('.pmpro_form').submit();
-                //         return true;
-                //     } else {
-                //         throw new Error( response.threeDSecureInfo.status );
-                //     }
-                // }).catch(function (e) {
-                //     console.log(e);
-                // });
-            // }).catch(function (e) {
-            //     console.log(e);
-            // });
         }
     });
 
     // Handle the response from Braintree.
     function braintreeResponseHandler( response ) {
 
-        console.log(response);
-
         var form;
 
         form = $('#pmpro_form, .pmpro_form');
 
         if ('CreditCard' === response.type) {
+            console.log( 'tokenized card' );
             // TODO Always pass these if available to optimize 3DS challenges.
             // if ( pmproBraintree.verifyAddress ) {
             //     billingAddress = {
@@ -84,24 +97,28 @@ jQuery(document).ready(function ($) {
             $( 'input[name="ExpirationYear"]' ).val( response.details.expirationYear );
             $( '#credit_card_exp' ).val( ( '0' + response.details.expirationMonth ).slice( -2 ) + '/' + response.details.expirationYear );
 
+            form.get(0).submit();
 
-            threeDSecure.verifyCard({
-                onLookupComplete: function (data, next) {
-                    next();
-                },
-                // TODO Get amount.
-                amount: '100.00',
-                nonce: response.nonce,
-                bin: response.details.bin,
-                // billingAddress: billingAddress,
-            }).then(braintreeResponseHandler);
+            // pmproBraintree.recurringAmountVerified = false;
+            // if ( pmpro.order.initial_amount && ! pmproBraintree.initialAmountVerified ) {
+            //     console.log( 'Verifying initial amount' );
+            //     threeDSecure.verifyCard({
+            //         onLookupComplete: function (data, next) {
+            //             next();
+            //         },
+            //         amount: pmpro.order.initial_amount,
+            //         nonce: response.nonce,
+            //         bin: response.details.bin,
+            //         // billingAddress: billingAddress,
+            //     }).then(braintreeResponseHandler);
+            // } else if ( pmpro.order.subscription_amount && ! pmproBraintree.recurringAmountVerified ) {
+            //     $( '#braintree_payment_method_nonce' ).val( response.nonce );
+            //     form.get(0).submit();
+            // }
         } else {
-            if ('authenticate_successful' === response.threeDSecureInfo.status) {
-                $( '#braintree_payment_method_nonce' ).val( response.nonce );
-                form.get(0).submit();
-            } else {
-                // TODO Handle errors.
-            }
+            // console.log( 'verified card' );
+            // $( '#braintree_payment_method_nonce' ).val( response.nonce );
+            // form.get(0).submit();
         }
     }
 
